@@ -11,6 +11,7 @@ import { v4 as uuidv4 } from "uuid";
 function isLikelyQuestion(s) {
   if (!s || typeof s !== "string") return false;
   if (/\?/.test(s)) return true;
+
   const lower = s.trim().toLowerCase();
   const starters = [
     "what",
@@ -27,18 +28,20 @@ function isLikelyQuestion(s) {
     "provide",
     "name",
   ];
+
   return starters.some((st) => lower.startsWith(st)) && s.split(" ").length > 3;
 }
 
 function tryParseJsonArrayFromText(text) {
   if (!text || typeof text !== "string") return null;
+
   const jsonArrayMatch = text.match(/\[[\s\S]*\]/);
   if (jsonArrayMatch) {
     try {
-      const parsed = JSON.parse(jsonArrayMatch[0]);
-      return parsed;
+      return JSON.parse(jsonArrayMatch[0]);
     } catch {}
   }
+
   return null;
 }
 
@@ -51,18 +54,27 @@ function extractQuestions(text) {
     const candidates = [];
     parsedArray.forEach((item) => {
       if (typeof item === "string") candidates.push(item);
-      if (typeof item === "object") {
+      if (typeof item === "object" && item !== null) {
         ["question", "text", "q", "prompt", "title"].forEach((k) => {
           if (item[k]) candidates.push(String(item[k]));
         });
       }
     });
-    const normalized = Array.from(new Set(candidates.map((c) => String(c).trim()).filter(Boolean).filter(isLikelyQuestion)));
+
+    const normalized = Array.from(
+      new Set(
+        candidates
+          .map((c) => String(c).trim())
+          .filter(Boolean)
+          .filter(isLikelyQuestion)
+      )
+    );
     if (normalized.length) return normalized;
   }
 
   let cleaned = trimmed.replace(/```[\s\S]*?```/g, "").replace(/\r/g, "\n").trim();
   cleaned = cleaned.replace(/```json|```/gi, "").trim();
+
   const normalize = (line) =>
     line
       .replace(/^\s*\d+[\).\s-]*/, "")
@@ -71,31 +83,39 @@ function extractQuestions(text) {
       .replace(/\b(question|q)[:\s-]*/gi, "")
       .replace(/^\s*not\s+write\s+question[:\s-]*/i, "")
       .trim();
+
   try {
     const parsed = JSON.parse(cleaned);
     const candidates = [];
+
     const collect = (obj) => {
       if (!obj) return;
+
       if (typeof obj === "string") {
         candidates.push(obj.trim());
         return;
       }
+
       if (Array.isArray(obj)) {
         obj.forEach(collect);
         return;
       }
+
       if (typeof obj === "object") {
         ["question", "text", "q", "prompt", "title"].forEach((k) => {
           if (obj[k]) collect(obj[k]);
         });
+
         Object.values(obj).forEach((v) => {
           if (typeof v === "string") collect(v);
           if (Array.isArray(v)) v.forEach(collect);
-          if (typeof v === "object") collect(v);
+          if (typeof v === "object" && v !== null) collect(v);
         });
       }
     };
+
     collect(parsed);
+
     const filtered = Array.from(
       new Set(
         candidates
@@ -105,6 +125,7 @@ function extractQuestions(text) {
           .filter(isLikelyQuestion)
       )
     );
+
     if (filtered.length) return filtered;
   } catch {}
 
@@ -115,6 +136,7 @@ function extractQuestions(text) {
     .filter(Boolean)
     .filter((line) => !/^(type|duration|job|position|category|difficulty)[:\s]/i.test(line))
     .filter(isLikelyQuestion);
+
   return Array.from(new Set(candidates));
 }
 
@@ -128,30 +150,23 @@ function QuestionListContainer({ questionList }) {
   }
 
   return (
-    <div className="rounded-2xl border border-slate-200 bg-white shadow-sm p-6">
-      <div className="flex items-start justify-between gap-4">
-        <div className="flex items-center gap-4">
-          <div className="flex h-11 w-11 items-center justify-center rounded-lg bg-linear-to-br from-blue-600 to-indigo-600 text-white text-lg font-semibold">
-            Q
-          </div>
-          <div>
-            <h3 className="text-lg font-semibold text-slate-900">Generated Interview Questions</h3>
-            <p className="mt-1 text-sm text-slate-500">
-              Questions have been generated and are ready for Interview.
-            </p>
-          </div>
-        </div>
-      </div>
-
-      <div className="mt-5">
-        <div className="rounded-md border border-slate-100 bg-slate-50 px-4 py-3 text-sm text-slate-700">
-          Questions have been generated. Click On Create Interview Link For Interview
-        </div>
-      </div>
-    </div>
-  );
-}
-
+     <div className="rounded-2xl border border-slate-200 bg-white shadow-sm p-6">
+     <div className="flex items-start justify-between gap-4"> 
+      <div className="flex items-center gap-4"> 
+        <div className="flex h-11 w-11 items-center justify-center rounded-lg bg-linear-to-br from-blue-600 to-indigo-600 text-white text-lg font-semibold"> Q </div>
+         <div> 
+          <h3 className="text-lg font-semibold text-slate-900">Generated Interview Questions</h3>
+           <p className="mt-1 text-sm text-slate-500"> Questions have been generated and are ready for Interview. </p> 
+           </div> 
+           </div> 
+           </div>
+            <div className="mt-5"> 
+              <div className="rounded-md border border-slate-100 bg-slate-50 px-4 py-3 text-sm text-slate-700"> Questions have been generated. Click On Create Interview Link For Interview </div> 
+              </div>
+               </div> 
+               );
+               }
+               
 export default function QuestionList({ formdata, onCreateLink }) {
   const { user } = useUser();
   const [loading, setLoading] = useState(false);
@@ -159,19 +174,45 @@ export default function QuestionList({ formdata, onCreateLink }) {
   const [questionList, setQuestionList] = useState([]);
 
   const generateQuestions = useCallback(async () => {
+    const jobPosition = formdata?.jobPosition ?? "";
+    const jobDescription = formdata?.jobDescription ?? "";
+    const duration = formdata?.duration ?? "30";
+    const type = formdata?.type ?? "technical";
+
+    if (!jobPosition || !jobDescription) {
+      setQuestionList([]);
+      return;
+    }
+
     setLoading(true);
     setQuestionList([]);
+
     try {
       const payload = {
-        jobPosition: formdata?.jobPosition ?? "",
-        jobDescription: formdata?.jobDescription ?? "",
-        duration: formdata?.duration ?? "30",
-        type: formdata?.type ?? "technical",
+        jobPosition,
+        jobDescription,
+        duration,
+        type,
       };
+
       const res = await axios.post("/api/ai-model", payload, { timeout: 120000 });
-      const content = String(res.data?.content ?? "");
-      const extracted = extractQuestions(content);
-      if (extracted.length === 0) {
+
+      const questionsFromApi = Array.isArray(res.data?.questions) ? res.data.questions : [];
+      const extractedFromContent = extractQuestions(String(res.data?.content ?? ""));
+
+      const finalQuestions =
+        questionsFromApi.length > 0
+          ? questionsFromApi
+              .map((q) => {
+                if (typeof q === "string") return q.trim();
+                if (q && typeof q === "object") return String(q.question ?? q.text ?? "").trim();
+                return "";
+              })
+              .filter(Boolean)
+          : extractedFromContent;
+
+      if (finalQuestions.length === 0) {
+        const content = String(res.data?.content ?? "");
         if (/provide the job description|please provide the job description|need the job description/i.test(content)) {
           toast("Please add a detailed job description and try again");
         } else {
@@ -181,10 +222,12 @@ export default function QuestionList({ formdata, onCreateLink }) {
         setQuestionList([]);
         return;
       }
-      setQuestionList(extracted.map((q) => (typeof q === "string" ? q.trim() : String(q).trim())));
+
+      setQuestionList(finalQuestions);
     } catch (error) {
       console.error("generateQuestions error:", error);
       const serverMsg = error?.response?.data?.error || error?.message || "AI service failed";
+
       const upstream = error?.response?.data?.upstream;
       if (upstream) {
         try {
@@ -194,28 +237,34 @@ export default function QuestionList({ formdata, onCreateLink }) {
           console.error("Upstream body (truncated):", String(upstream).slice(0, 2000));
         }
       }
+
       toast(serverMsg);
       setQuestionList([]);
     } finally {
       setLoading(false);
     }
-  }, [formdata]);
+  }, [formdata?.jobPosition, formdata?.jobDescription, formdata?.duration, formdata?.type]);
 
   useEffect(() => {
-    if (formdata?.jobPosition && formdata?.jobDescription) generateQuestions();
-  }, [formdata, generateQuestions]);
+    if (formdata?.jobPosition && formdata?.jobDescription) {
+      generateQuestions();
+    }
+  }, [formdata?.jobPosition, formdata?.jobDescription, generateQuestions]);
 
   async function onFinish() {
     if (!user?.email) {
       toast("User not logged in");
       return;
     }
+
     if (questionList.length === 0) {
       toast("No questions to save");
       return;
     }
+
     setSaving(true);
     const interview_id = uuidv4();
+
     try {
       const res = await fetch("/api/create-interview", {
         method: "POST",
@@ -243,7 +292,6 @@ export default function QuestionList({ formdata, onCreateLink }) {
         const serverMsg = payload?.error || payload?.message || "Create interview failed";
         toast(serverMsg);
         console.error("create-interview failed:", payload);
-        setSaving(false);
         return;
       }
 
@@ -269,8 +317,15 @@ export default function QuestionList({ formdata, onCreateLink }) {
           </div>
         </div>
       )}
-      {!loading && questionList.length > 0 && <QuestionListContainer questionList={questionList} />}
-      {!loading && questionList.length === 0 && <p className="text-sm text-slate-500">No questions generated yet</p>}
+
+      {!loading && questionList.length > 0 && (
+        <QuestionListContainer questionList={questionList} />
+      )}
+
+      {!loading && questionList.length === 0 && (
+        <p className="text-sm text-slate-500">No questions generated yet</p>
+      )}
+
       <div className="flex justify-end">
         <Button onClick={onFinish} disabled={saving}>
           {saving && <Loader2Icon className="mr-2 animate-spin" />}

@@ -688,24 +688,44 @@ const generateFeedbackAndSave = useCallback(async () => {
     const questionsString = qArray.map((q, idx) => `${idx + 1}. ${q.question}`).filter(Boolean).join("\n");
 
     const vapiOptions = {
-      name: "AI Recruiter",
-      firstMessage: `Hi ${interviewInfo?.userName ?? "candidate"}, ready for your interview?`,
-      firstMessageMode: "assistant-speaks-first",
-      transcriber: {
-        provider: "deepgram",
-        model: "nova-2",
-        language: "en-US"
-      },
-      voice: buildVoiceOptions(),
-      model: {
-        provider: "openai",
-        model: "gpt-3.5-turbo",
-        messages: [{
-          role: "system",
-          content: `You are an AI voice assistant conducting interviews. Ask one question at a time and wait for the candidate's response. Below are the questions:\n${questionsString}`.trim()
-        }]
-      }
-    };
+  name: "AI Recruiter",
+  firstMessage: `Hi ${interviewInfo?.userName ?? "candidate"}, ready for your interview?`,
+  firstMessageMode: "assistant-speaks-first",
+  transcriber: {
+    provider: "deepgram",
+    model: "nova-2",
+    language: "en-US"
+  },
+
+  startSpeakingPlan: {
+    waitSeconds: 0.5
+  },
+
+  stopSpeakingPlan: {
+    numWords: 2,
+    voiceSeconds: 0.35,
+    backoffSeconds: 0.8,
+    acknowledgementPhrases: ["yeah", "yes", "ok", "okay", "right", "mm-hmm"]
+  },
+
+  voice: {
+    provider: "openai",
+    voiceId: "alloy",
+    speed: 0.90,
+    fallbackPlan: {
+      voices: [{ provider: "azure", voiceId: "en-US-JennyNeural" }]
+    }
+  },
+
+  model: {
+    provider: "openai",
+    model: "gpt-4o-mini",
+    messages: [{
+      role: "system",
+      content: `You are an AI voice assistant conducting interviews. Ask one question at a time and wait for the candidate's response. Keep each question under 20 words. Below are the questions:\n${questionsString}`.trim()
+    }]
+  }
+};
 
     let attempt = 0;
     while (attempt < MAX_VAPI_START_RETRIES && isMountedRef.current && state.isConnecting) {

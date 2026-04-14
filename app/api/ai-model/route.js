@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
-import { QUESTIONS_PROMPT } from "@/lib/services/Constants";
+
+export const runtime = "nodejs";
 
 async function fetchWithTimeout(url, options = {}, ms = 120000) {
   const controller = new AbortController();
@@ -11,151 +12,243 @@ async function fetchWithTimeout(url, options = {}, ms = 120000) {
   }
 }
 
-async function callOpenRouter(model, payload, apiKey, timeoutMs = 120000) {
-  const url = "https://openrouter.ai/api/v1/chat/completions";
-  return await fetchWithTimeout(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${apiKey}`
-    },
-    body: JSON.stringify({ ...payload, model })
-  }, timeoutMs);
+function safeText(v) {
+  return String(v ?? "").trim();
+}
+
+function fallbackQuestions(jobPosition, type) {
+  const title = safeText(jobPosition) || "this role";
+  const interviewType = safeText(type).toLowerCase();
+
+  const technical = [
+    `Can you explain the core Java concepts you use most often in ${title}?`,
+    `How do you debug and fix a bug in a Java application?`,
+    `What is the difference between ArrayList and LinkedList in Java?`,
+    `How do you handle exceptions in Java code?`,
+  ];
+
+  const behavioral = [
+    `Tell me about a time you solved a difficult problem in a team.`,
+    `How do you handle deadlines when multiple tasks are pending?`,
+    `Describe a situation where you learned a new skill quickly.`,
+    `How do you handle feedback from a senior developer or interviewer?`,
+  ];
+
+  const problemSolving = [
+    `How would you approach a performance issue in a Java application?`,
+    `How would you design a simple solution for a real-world business problem?`,
+    `What steps do you take when your code works locally but fails in production?`,
+    `How do you break down a complex task into smaller parts?`,
+  ];
+
+  let selected = technical;
+  if (interviewType.includes("behavior")) selected = behavioral;
+  else if (interviewType.includes("problem")) selected = problemSolving;
+
+  return selected.slice(0, 4).map((question) => ({
+    question,
+    type:
+      interviewType.includes("behavior")
+        ? "Behavioral"
+        : interviewType.includes("problem")
+          ? "Problem Solving"
+          : "Technical",
+  }));
 }
 
 function tryParseJSONLoose(raw) {
   if (!raw || typeof raw !== "string") return null;
+
   const trimmed = raw.trim();
+
   try {
     return JSON.parse(trimmed);
-  } catch {
-    const firstObj = trimmed.indexOf("{");
-    const lastObj = trimmed.lastIndexOf("}");
-    if (firstObj !== -1 && lastObj !== -1 && lastObj > firstObj) {
-      try {
-        return JSON.parse(trimmed.slice(firstObj, lastObj + 1));
-      } catch {}
-    }
-    return null;
+  } catch {}
+
+  const firstArr = trimmed.indexOf("[");
+  const lastArr = trimmed.lastIndexOf("]");
+  if (firstArr !== -1 && lastArr !== -1 && lastArr > firstArr) {
+    try {
+      return JSON.parse(trimmed.slice(firstArr, lastArr + 1));
+    } catch {}
   }
+
+  const firstObj = trimmed.indexOf("{");
+  const lastObj = trimmed.lastIndexOf("}");
+  if (firstObj !== -1 && lastObj !== -1 && lastObj > firstObj) {
+    try {
+      return JSON.parse(trimmed.slice(firstObj, lastObj + 1));
+    } catch {}
+  }
+
+  return null;
 }
 
-function extractAssistantContent(rawText, parsedData) {
-  const text = String(rawText || "").trim();
-  let out = "";
-  const choice = parsedData?.choices?.[0] ?? null;
-  if (choice) {
-    out = String(choice?.message?.content ?? choice?.text ?? choice?.message?.reasoning ?? "").trim();
-    if (!out && Array.isArray(choice?.message?.reasoning_details)) {
-      out = choice.message.reasoning_details.map((d) => (d && d.text ? String(d.text).trim() : "")).filter(Boolean).join("\n\n");
-    }
-  }
-  if (!out) {
-    const jsonArrayMatch = text.match(/\[[\s\S]*\]/);
-    if (jsonArrayMatch) {
-      out = jsonArrayMatch[0].trim();
-    }
-  }
-  if (!out) out = text;
-  return out;
+function normalizeQuestions(data) {
+  const source = Array.isArray(data)
+    ? data
+    : Array.isArray(data?.questions)
+      ? data.questions
+      : [];
+
+  return source
+    .map((item) => {
+      if (typeof item === "string") {
+        const q = item.trim();
+        return q ? { question: q, type: "Technical" } : null;
+      }
+
+      if (item && typeof item === "object") {
+        const question = safeText(
+          item.question ?? item.text ?? item.q ?? item.prompt
+        );
+        if (!question) return null;
+
+        return {
+          question,
+          type: safeText(item.type) || "Technical",
+        };
+      }
+
+      return null;
+    })
+    .filter(Boolean);
 }
 
-function isTransientNetworkError(e) {
-  if (!e) return false;
-  const name = e.name || "";
-  const code = e.code || (e?.cause && e.cause.code) || "";
-  const msg = String(e.message || "").toLowerCase();
-  if (name === "AbortError") return true;
-  if (code && /timeout|ECONNRESET|ENOTFOUND|EAI_AGAIN|ECONNREFUSED|UND_ERR_CONNECT_TIMEOUT/i.test(String(code))) return true;
-  if (/connect.*timeout|connect.*refused|network.*error|connect timeout|connection timed out|timeout/i.test(msg)) return true;
-  return false;
+function extractAssistantText(rawText) {
+  const parsed = tryParseJSONLoose(rawText);
+
+  const content =
+    parsed?.choices?.[0]?.message?.content ??
+    parsed?.choices?.[0]?.text ??
+    parsed?.choices?.[0]?.message?.reasoning ??
+    "";
+
+  if (typeof content === "string" && content.trim()) {
+    return content.trim();
+  }
+
+  return safeText(rawText);
+}
+
+async function callOpenRouter(model, payload, apiKey, timeoutMs = 120000) {
+  const url = "https://openrouter.ai/api/v1/chat/completions";
+
+  return await fetchWithTimeout(
+    url,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+        "HTTP-Referer": process.env.OPENROUTER_SITE_URL || "http://localhost:3000",
+        "X-Title": process.env.OPENROUTER_APP_NAME || "Interview Generator",
+      },
+      body: JSON.stringify({ ...payload, model }),
+    },
+    timeoutMs
+  );
 }
 
 export async function POST(req) {
   try {
     const body = await req.json().catch(() => ({}));
-    const { jobPosition, jobDescription, duration = "30", type = "technical" } = body || {};
+    const { jobPosition, jobDescription, duration = "30", type = "technical" } =
+      body || {};
+
     if (!jobPosition || !jobDescription) {
-      return NextResponse.json({ error: "Missing jobPosition or jobDescription" }, { status: 400 });
+      return NextResponse.json(
+        { error: "Missing jobPosition or jobDescription" },
+        { status: 400 }
+      );
     }
+
+    const fallback = fallbackQuestions(jobPosition, type);
 
     const OPENROUTER_KEY = process.env.OPENROUTER_API_KEY?.trim();
-    if (!OPENROUTER_KEY) {
-      return NextResponse.json({ error: "Server misconfiguration: missing OPENROUTER_API_KEY" }, { status: 500 });
+    const model = process.env.OPENROUTER_MODEL?.trim();
+
+    if (!OPENROUTER_KEY || !model) {
+      return NextResponse.json(
+        { questions: fallback, fallback: true },
+        { status: 200 }
+      );
     }
 
-    const configuredModel = (process.env.OPENROUTER_MODEL || "openrouter/gpt-4o-mini").trim();
-    const fallbackModels = ["openrouter/free", "openrouter/gpt-4o-mini", "openrouter/gpt-4o"];
-    const safeDuration = /^\s*\d+\s*$/i.test(String(duration)) ? `${String(duration).trim()}min` : String(duration);
+    const prompt = `
+Return ONLY valid JSON:
+{
+  "questions": [
+    { "question": "string", "type": "Technical" }
+  ]
+}
 
-    const FINAL_PROMPT = (QUESTIONS_PROMPT || "")
-      .replace("{{jobTitle}}", String(jobPosition))
-      .replace("{{jobDescription}}", String(jobDescription))
-      .replace("{{duration}}", String(safeDuration))
-      .replace("{{type}}", String(type));
+Generate 3 to 5 questions for a ${duration}-minute ${type} interview.
+Role: ${jobPosition}
+Job description: ${jobDescription}
+
+Rules:
+- question must be a single interview question
+- type must be one of: Technical, Behavioral, Problem Solving, Experience
+- no markdown
+- no explanation
+- no extra keys
+`.trim();
 
     const payload = {
-      messages: [{ role: "user", content: FINAL_PROMPT }],
+      messages: [
+        {
+          role: "system",
+          content: "You generate interview questions and output only JSON.",
+        },
+        { role: "user", content: prompt },
+      ],
       temperature: 0.2,
-      max_tokens: 400
+      max_tokens: 500,
     };
 
-    async function tryModelWithRetries(model) {
-      const maxAttempts = 3;
-      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-        try {
-          const resp = await callOpenRouter(model, payload, OPENROUTER_KEY, 120000);
-          if (!resp) throw new Error("no response");
-          const status = resp.status;
-          const rawText = await resp.text().catch(() => "");
-          if (status === 404) {
-            throw Object.assign(new Error("model_not_found"), { status, rawText });
-          }
-          if (!resp.ok) {
-            const parsedErr = tryParseJSONLoose(rawText) ?? {};
-            const upstreamMsg = (parsedErr?.error && parsedErr.error.message) ? parsedErr.error.message : rawText;
-            throw Object.assign(new Error("upstream_error"), { status, upstreamMsg, rawText });
-          }
-          const parsed = tryParseJSONLoose(rawText) ?? {};
-          const extractedText = extractAssistantContent(rawText, parsed);
-          if (!extractedText || extractedText.length === 0) {
-            throw Object.assign(new Error("empty_content"), { status: 502, rawText });
-          }
-          return { ok: true, status, text: extractedText };
-        } catch (e) {
-          if (e && e.status === 404) {
-            return { ok: false, status: 404, text: e.rawText || "model not found" };
-          }
-          if (isTransientNetworkError(e) && attempt < maxAttempts) {
-            const delay = 500 * Math.pow(2, attempt - 1);
-            await new Promise((r) => setTimeout(r, delay));
-            continue;
-          }
-          if (e && e.upstreamMsg) {
-            return { ok: false, status: e.status || 502, text: e.upstreamMsg || e.rawText || String(e) };
-          }
-          return { ok: false, status: e?.status || 502, text: e?.message || String(e) };
-        }
-      }
-      return { ok: false, status: 504, text: "network timeout after retries" };
+    const resp = await callOpenRouter(model, payload, OPENROUTER_KEY, 120000);
+    const rawText = await resp.text().catch(() => "");
+    const parsed = tryParseJSONLoose(rawText);
+
+    if (!resp.ok) {
+      console.error("OpenRouter error:", resp.status, rawText);
+      return NextResponse.json(
+        {
+          questions: fallback,
+          fallback: true,
+          upstreamError: rawText || `OpenRouter error ${resp.status}`,
+        },
+        { status: 200 }
+      );
     }
 
-    const modelsToTry = [configuredModel, ...fallbackModels.filter((m) => m !== configuredModel)];
-    for (const model of modelsToTry) {
-      const result = await tryModelWithRetries(model);
-      if (result.ok) {
-        return NextResponse.json({ content: result.text }, { status: 200 });
-      }
-      if (result.status === 404) {
-        continue;
-      } else {
-        return NextResponse.json({ error: `OpenRouter error ${result.status}`, upstream: result.text }, { status: 502 });
-      }
+    const assistantText = extractAssistantText(rawText);
+    const jsonCandidate = tryParseJSONLoose(assistantText) ?? tryParseJSONLoose(rawText);
+    const questions = normalizeQuestions(jsonCandidate);
+
+    if (!questions.length) {
+      console.error("No valid questions parsed:", assistantText);
+      return NextResponse.json(
+        {
+          questions: fallback,
+          fallback: true,
+          upstreamError: "AI returned invalid question format",
+        },
+        { status: 200 }
+      );
     }
 
-    return NextResponse.json({ error: "OpenRouter: no working model available" }, { status: 502 });
+    return NextResponse.json({ questions }, { status: 200 });
   } catch (err) {
-    const safeMsg = err && err.message ? String(err.message) : "AI service failed";
-    return NextResponse.json({ error: safeMsg }, { status: 502 });
+    console.error("ai-model route failed:", err);
+    return NextResponse.json(
+      {
+        questions: fallbackQuestions("Java Developer", "technical"),
+        fallback: true,
+        error: err?.message || "AI service failed",
+      },
+      { status: 200 }
+    );
   }
 }
